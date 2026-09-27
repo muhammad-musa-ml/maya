@@ -1,5 +1,33 @@
 # MAYA benchmarks
 
+## Sandbox output cap (Windows, 26 September 2026)
+
+The sandbox previously used `subprocess.run(capture_output=True)` and checked its
+2 MiB output cap only after the child exited. A child could therefore fill parent
+memory with stdout or stderr while the parent waited for the wall-clock limit.
+The new transport drains both pipes concurrently and stops the child when their
+combined output crosses the cap.
+The [Python subprocess documentation](https://docs.python.org/3.13/library/subprocess.html#subprocess.Popen.communicate)
+warns that `communicate()` buffers output in memory; the
+[Windows `select` documentation](https://docs.python.org/3.13/library/select.html)
+explains why a pipe selector cannot serve as a portable replacement. Reader
+threads drain the two pipes concurrently on all supported platforms.
+
+On Windows 11 with Python 3.13.5, a child attempting 32 MiB of stdout caused
+**33.042 MiB** peak parent Python allocations with the previous transport and
+**4.119 MiB** with the bounded drain. The drain retained **2.000 MiB**. These
+are single-run `tracemalloc` readings of the parent Python process; they do
+not measure process RSS. Run `python tools/bench/bench_sandbox_output.py` to
+repeat the measurement. The machine details and all eight readings are in
+[`sandbox-output.json`](benchmarks/sandbox-output.json).
+
+![Peak parent Python memory by attempted child output](benchmarks/sandbox-output.svg)
+
+The regression tests in `tests/test_sandbox.py` also verify immediate termination
+of still-running stdout and stderr writers, and that both streams share one cap.
+
+---
+
 Measured on 19 September 2026, against the success criteria (§3) and the capacity
 and performance targets (§24.3) in the requirements. Every number here comes from
 the result files in [`docs/benchmarks/`](benchmarks/). Each is the unedited JSON

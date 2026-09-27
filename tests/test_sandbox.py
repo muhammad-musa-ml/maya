@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from maya.formula.artifact import validate_artifact
@@ -106,6 +108,42 @@ def test_network_disabled_in_child() -> None:
     assert not res["ok"] and "network access is disabled" in res["error"]
 
 
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_output_cap_stops_a_still_running_artifact(stream: str) -> None:
+    # A post-exit size check waits for the wall-clock timeout and retains all bytes.
+    # Both output pipes must be drained and charged to the same cap as they arrive.
+    src = (
+        "import sys\n"
+        "def run(X, params):\n"
+        f"    stream = sys.{stream}\n"
+        "    while True:\n"
+        "        stream.write('x' * 8192)\n"
+        "        stream.flush()\n"
+    )
+    res = run_sandboxed(
+        src, "run", {"X": {}, "params": {}}, preload=(),
+        wall_seconds=5, output_limit_bytes=4096,
+    )
+    assert not res["ok"]
+    assert res["error"] == "output exceeded the 4096-byte cap"
+    assert res["duration"] < 5
+
+
+def test_output_cap_is_shared_between_stdout_and_stderr() -> None:
+    src = (
+        "import sys\n"
+        "def run(X, params):\n"
+        "    sys.stdout.write('x' * 3000)\n"
+        "    sys.stdout.flush()\n"
+        "    sys.stderr.write('y' * 3000)\n"
+        "    sys.stderr.flush()\n"
+        "    return 1\n"
+    )
+    res = run_sandboxed(src, "run", {"X": {}, "params": {}}, preload=(), output_limit_bytes=4096)
+    assert not res["ok"]
+    assert res["error"] == "output exceeded the 4096-byte cap"
+
+
 def test_file_write_blocked_by_rlimit() -> None:
     import platform
 
@@ -119,6 +157,7 @@ def test_file_write_blocked_by_rlimit() -> None:
     assert not res["ok"]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="bubblewrap bind layout is Linux only")
 def test_an_interpreter_reached_through_unbound_links_still_starts(tmp_path, monkeypatch):
     """A venv made with ``~/.local/bin/python3.13 -m venv`` links through the home
     directory, which the sandbox hides. Each unbound hop must be recreated, or the child

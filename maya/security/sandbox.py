@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -369,6 +370,75 @@ def _argv(workdir: str, memory_mb: int, cpu_seconds: int) -> list[str]:
     return argv
 
 
+def _run_capped(
+    argv: list[str], request: str, cwd: str, env: dict[str, str],
+    wall_seconds: int, output_limit_bytes: int,
+) -> tuple[bytes, bytes, int | None, str | None]:
+    """Drain both pipes while the child runs; never retain more than the output cap.
+
+    ``subprocess.run(capture_output=True)`` buffers unbounded output before its caller
+    can check a limit. Reader threads work on Windows too, where selectors cannot
+    select anonymous subprocess pipes. The writer is separate so a large input cannot
+    deadlock against a child that writes before reading it.
+    """
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=cwd, env=env,
+    )
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    stdout = bytearray()
+    stderr = bytearray()
+    exceeded = threading.Event()
+    lock = threading.Lock()
+    retained = 0
+
+    def drain(pipe: Any, target: bytearray) -> None:
+        nonlocal retained
+        with pipe:
+            while chunk := os.read(pipe.fileno(), 65536):
+                with lock:
+                    space = max(0, output_limit_bytes - retained)
+                    target.extend(chunk[:space])
+                    retained += min(len(chunk), space)
+                    if len(chunk) > space:
+                        exceeded.set()
+
+    def write_input() -> None:
+        try:
+            with proc.stdin:
+                proc.stdin.write(request.encode("utf-8"))
+        except (BrokenPipeError, OSError):
+            pass  # a child may refuse or exit before reading its request
+
+    readers = [
+        threading.Thread(target=drain, args=(proc.stdout, stdout), daemon=True),
+        threading.Thread(target=drain, args=(proc.stderr, stderr), daemon=True),
+    ]
+    for thread in readers:
+        thread.start()
+    writer = threading.Thread(target=write_input, daemon=True)
+    writer.start()
+    deadline = time.monotonic() + wall_seconds
+    reason: str | None = None
+    while True:
+        if exceeded.is_set():
+            reason = "output"
+            break
+        if time.monotonic() >= deadline:
+            reason = "timeout"
+            break
+        if proc.poll() is not None and all(not thread.is_alive() for thread in readers):
+            break
+        time.sleep(0.01)
+    if reason is not None and proc.poll() is None:
+        proc.kill()
+    proc.wait()
+    for thread in readers:
+        thread.join(timeout=0.5)
+    writer.join(timeout=0.5)
+    return bytes(stdout), bytes(stderr), proc.returncode, reason
+
+
 def run_sandboxed(
     source: str,
     entry: str,
@@ -396,18 +466,11 @@ def run_sandboxed(
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="maya-sbx-") as cwd:
         shutil.copy(RUNNER, Path(cwd) / "sandbox_runner.py")
-        try:
-            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                _argv(cwd, memory_mb, cpu_seconds),
-                input=request,
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                env=_child_env(),
-                timeout=wall_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
+        out, err, returncode, reason = _run_capped(
+            _argv(cwd, memory_mb, cpu_seconds), request, cwd, _child_env(),
+            wall_seconds, output_limit_bytes,
+        )
+        if reason == "timeout":
             return {
                 "ok": False,
                 "result": None,
@@ -415,26 +478,25 @@ def run_sandboxed(
                 "error": f"wall-clock limit of {wall_seconds}s exceeded; the process was killed",
                 "duration": time.monotonic() - started,
             }
+        if reason == "output":
+            return {
+                "ok": False,
+                "result": None,
+                "tier": tier["tier"],
+                "duration": time.monotonic() - started,
+                "error": f"output exceeded the {output_limit_bytes}-byte cap",
+            }
     duration = time.monotonic() - started
-    out = proc.stdout or ""
-    if len(out.encode()) > output_limit_bytes:
-        return {
-            "ok": False,
-            "result": None,
-            "tier": tier["tier"],
-            "duration": duration,
-            "error": f"output exceeded the {output_limit_bytes}-byte cap",
-        }
     try:
         response = json.loads(out)
     except json.JSONDecodeError:
-        why = _exit_reason(proc.returncode)
+        why = _exit_reason(returncode)
         return {
             "ok": False,
             "result": None,
             "tier": tier["tier"],
             "duration": duration,
-            "error": f"sandboxed process produced no result ({why}): {(proc.stderr or '')[-500:]}",
+            "error": f"sandboxed process produced no result ({why}): {err.decode('utf-8', 'replace')[-500:]}",
         }
     return {
         "ok": bool(response.get("ok")),

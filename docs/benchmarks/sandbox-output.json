@@ -1,0 +1,72 @@
+{
+  "python": "3.13.5",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "cap_mb": 2.0,
+  "method": "tracemalloc peak of parent Python allocations; one run per point",
+  "measurements": [
+    {
+      "child_output_mb": 1,
+      "transport": "previous_capture_output",
+      "parent_python_peak_mb": 1.331,
+      "retained_output_mb": 1.0,
+      "elapsed_seconds": 0.143,
+      "termination": "completed"
+    },
+    {
+      "child_output_mb": 1,
+      "transport": "bounded",
+      "parent_python_peak_mb": 2.067,
+      "retained_output_mb": 1.0,
+      "elapsed_seconds": 0.06,
+      "termination": null
+    },
+    {
+      "child_output_mb": 4,
+      "transport": "previous_capture_output",
+      "parent_python_peak_mb": 4.488,
+      "retained_output_mb": 4.0,
+      "elapsed_seconds": 0.093,
+      "termination": "completed"
+    },
+    {
+      "child_output_mb": 4,
+      "transport": "bounded",
+      "parent_python_peak_mb": 4.12,
+      "retained_output_mb": 2.0,
+      "elapsed_seconds": 0.069,
+      "termination": "output"
+    },
+    {
+      "child_output_mb": 16,
+      "transport": "previous_capture_output",
+      "parent_python_peak_mb": 16.314,
+      "retained_output_mb": 16.0,
+      "elapsed_seconds": 0.16,
+      "termination": "completed"
+    },
+    {
+      "child_output_mb": 16,
+      "transport": "bounded",
+      "parent_python_peak_mb": 4.12,
+      "retained_output_mb": 2.0,
+      "elapsed_seconds": 0.066,
+      "termination": "output"
+    },
+    {
+      "child_output_mb": 32,
+      "transport": "previous_capture_output",
+      "parent_python_peak_mb": 33.042,
+      "retained_output_mb": 32.0,
+      "elapsed_seconds": 0.26,
+      "termination": "completed"
+    },
+    {
+      "child_output_mb": 32,
+      "transport": "bounded",
+      "parent_python_peak_mb": 4.119,
+      "retained_output_mb": 2.0,
+      "elapsed_seconds": 0.085,
+      "termination": "output"
+    }
+  ]
+}
