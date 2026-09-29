@@ -121,8 +121,12 @@ def test_output_cap_stops_a_still_running_artifact(stream: str) -> None:
         "        stream.flush()\n"
     )
     res = run_sandboxed(
-        src, "run", {"X": {}, "params": {}}, preload=(),
-        wall_seconds=5, output_limit_bytes=4096,
+        src,
+        "run",
+        {"X": {}, "params": {}},
+        preload=(),
+        wall_seconds=5,
+        output_limit_bytes=4096,
     )
     assert not res["ok"]
     assert res["error"] == "output exceeded the 4096-byte cap"

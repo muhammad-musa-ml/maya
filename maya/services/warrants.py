@@ -793,7 +793,7 @@ class WarrantService:
 
         def predict(frame: pd.DataFrame) -> tuple[np.ndarray, dict[str, Any]]:
             if irmod.is_opaque(mv["formula_ir"] or {}):
-                return self._predict_blind(mv, frame, bindings, prm, target)
+                return self._predict_blind(p, warrant_id, mv, frame, bindings, prm, target)
             return self.predict(mv, frame, bindings, prm), {}
 
         return {
@@ -870,6 +870,8 @@ class WarrantService:
 
     def _predict_blind(
         self,
+        p: Principal,
+        warrant_id: str,
         mv: dict[str, Any],
         df: pd.DataFrame,
         bindings: dict[str, str],
@@ -920,7 +922,7 @@ class WarrantService:
             output_limit_bytes=max(2_000_000, 64 * len(df)),
         )
         if not out["ok"]:
-            raise ValidationFailed(f"The black box failed in the sandbox: {out['error']}")
+            raise self._withheld_failure(p, warrant_id, mv, out, len(df))
         result = out["result"]
         if isinstance(result, dict):
             result = next(iter(result.values()), None)
@@ -934,6 +936,52 @@ class WarrantService:
             "sandbox_tier": out["tier"],
             "artifact_hash": mv["artifact_hash"],
         }
+
+    def _withheld_failure(
+        self,
+        p: Principal,
+        warrant_id: str,
+        mv: dict[str, Any],
+        out: dict[str, Any],
+        rows: int,
+    ) -> ValidationFailed:
+        """A black box that fails on the holdout: counted, and told in MAYA's words only.
+
+        The artifact was handed the escrowed rows, so anything it wrote -- an exception
+        message, the tail of its stderr -- may be those rows, and passing it back would give
+        the requester the partition §29.4 withholds. The sandbox's own verdicts (a timeout,
+        the output cap) are MAYA's and are said; the artifact's text goes to the audit log,
+        which only an administrator reads. The run read the holdout, so it is an attempt."""
+        failure = out.get("failure") or "raised"
+        self.record_attempt(
+            p,
+            warrant_id,
+            {
+                "failed": failure,
+                "rows": rows,
+                "scored_in": "sandbox",
+                "sandbox_tier": out.get("tier"),
+                "artifact_hash": mv.get("artifact_hash"),
+            },
+        )
+        with self.p.uow(p.username) as uow:
+            uow.audit(
+                "holdout.blind_failure",
+                object_type="training_warrant",
+                object_ref=warrant_id,
+                detail={"failure": failure, "withheld": str(out.get("error") or "")[:4000]},
+            )
+        said = {
+            "timeout": "it ran past the sandbox's wall-clock limit",
+            "output": "its output passed the sandbox's size cap",
+        }.get(failure, "it raised an error or returned no result")
+        return ValidationFailed(
+            f"The black box failed in the sandbox on the escrowed holdout: {said}. What the "
+            "artifact itself wrote is withheld, because code holding the holdout's rows wrote "
+            "it; an administrator can read it in the audit log. The run counts as an attempt. "
+            "Reproduce the failure on the training partition to debug it.",
+            sandbox_failure=failure,
+        )
 
     def predict(
         self, mv: dict[str, Any], df: pd.DataFrame, bindings: dict[str, str], values: dict[str, Any]

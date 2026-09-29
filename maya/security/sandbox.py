@@ -370,9 +370,31 @@ def _argv(workdir: str, memory_mb: int, cpu_seconds: int) -> list[str]:
     return argv
 
 
+def _await_child(
+    proc: subprocess.Popen[bytes],
+    readers: list[threading.Thread],
+    exceeded: threading.Event,
+    wall_seconds: int,
+) -> str | None:
+    """Wait for the child and its pipes; ``"output"`` or ``"timeout"`` if a cap stopped it."""
+    deadline = time.monotonic() + wall_seconds
+    while not exceeded.is_set():
+        if time.monotonic() >= deadline:
+            return "timeout"
+        if proc.poll() is not None and not any(thread.is_alive() for thread in readers):
+            # a reader may set the flag on its last chunk just before it finishes
+            return "output" if exceeded.is_set() else None
+        time.sleep(0.01)
+    return "output"
+
+
 def _run_capped(
-    argv: list[str], request: str, cwd: str, env: dict[str, str],
-    wall_seconds: int, output_limit_bytes: int,
+    argv: list[str],
+    request: str,
+    cwd: str,
+    env: dict[str, str],
+    wall_seconds: int,
+    output_limit_bytes: int,
 ) -> tuple[bytes, bytes, int | None, str | None]:
     """Drain both pipes while the child runs; never retain more than the output cap.
 
@@ -382,8 +404,12 @@ def _run_capped(
     deadlock against a child that writes before reading it.
     """
     proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=cwd, env=env,
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        env=env,
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     stdout = bytearray()
@@ -418,18 +444,7 @@ def _run_capped(
         thread.start()
     writer = threading.Thread(target=write_input, daemon=True)
     writer.start()
-    deadline = time.monotonic() + wall_seconds
-    reason: str | None = None
-    while True:
-        if exceeded.is_set():
-            reason = "output"
-            break
-        if time.monotonic() >= deadline:
-            reason = "timeout"
-            break
-        if proc.poll() is not None and all(not thread.is_alive() for thread in readers):
-            break
-        time.sleep(0.01)
+    reason = _await_child(proc, readers, exceeded, wall_seconds)
     if reason is not None and proc.poll() is None:
         proc.kill()
     proc.wait()
@@ -467,8 +482,12 @@ def run_sandboxed(
     with tempfile.TemporaryDirectory(prefix="maya-sbx-") as cwd:
         shutil.copy(RUNNER, Path(cwd) / "sandbox_runner.py")
         out, err, returncode, reason = _run_capped(
-            _argv(cwd, memory_mb, cpu_seconds), request, cwd, _child_env(),
-            wall_seconds, output_limit_bytes,
+            _argv(cwd, memory_mb, cpu_seconds),
+            request,
+            cwd,
+            _child_env(),
+            wall_seconds,
+            output_limit_bytes,
         )
         if reason == "timeout":
             return {
@@ -476,6 +495,7 @@ def run_sandboxed(
                 "result": None,
                 "tier": tier["tier"],
                 "error": f"wall-clock limit of {wall_seconds}s exceeded; the process was killed",
+                "failure": "timeout",
                 "duration": time.monotonic() - started,
             }
         if reason == "output":
@@ -485,6 +505,7 @@ def run_sandboxed(
                 "tier": tier["tier"],
                 "duration": time.monotonic() - started,
                 "error": f"output exceeded the {output_limit_bytes}-byte cap",
+                "failure": "output",
             }
     duration = time.monotonic() - started
     try:
@@ -497,11 +518,13 @@ def run_sandboxed(
             "tier": tier["tier"],
             "duration": duration,
             "error": f"sandboxed process produced no result ({why}): {err.decode('utf-8', 'replace')[-500:]}",
+            "failure": "no_result",
         }
     return {
         "ok": bool(response.get("ok")),
         "result": response.get("result"),
         "error": response.get("error"),
+        "failure": None if response.get("ok") else "raised",
         "tier": tier["tier"],
         "duration": duration,
         "limits_applied": response.get("limits_applied", []),

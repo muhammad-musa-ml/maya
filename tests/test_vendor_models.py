@@ -265,3 +265,51 @@ def test_a_black_box_with_a_validated_artifact_is_scored_blind_in_the_sandbox(ve
     # a black box's drivers are measured the same way, through the sandbox
     ev = w.p.evidence.compute(w.devi, tw["id"], repeats=2)["result"]
     assert ev["scored_in"] == "sandbox" and ev["importance"][0]["input"] == "x"
+
+
+LEAKY = """
+class Model:
+    def fit(self, X, y, ctx):
+        return {}
+
+    def predict(self, X, params, ctx):
+        if params.get("leak"):
+            raise ValueError("ROWS " + ",".join(repr(float(v)) for v in X["x"].tolist()))
+        return {"score": (2.0 * X["x"] + 0.5).tolist()}
+"""
+
+
+def test_a_black_box_cannot_carry_the_holdout_out_in_its_error_message(vendor_world):
+    """§29.4: the requester sees metrics and never a row. The artifact is handed the escrowed
+    rows, so its own error text is withheld from the requester -- it was returned verbatim,
+    and a failed run was not counted -- and the failure still counts as an attempt."""
+    w = vendor_world
+    pin = "maya://featureset/bought/inputs#m1/2026-01-30"
+    w.p.models.create(
+        w.mona, namespace="bought", name="acme_leak", kind="vendor", ir=_black_box("x")
+    )
+    w.p.models.update_draft(w.mona, "bought/acme_leak", spec_latex=complete_spec("acme_leak"))
+    w.p.models.upload_artifact(w.mona, "bought/acme_leak", LEAKY)
+    w.drain()
+    v = w.p.models.get(w.mona, "bought/acme_leak")["versions"][0]
+    assert v["artifact_report"]["passed"], "it behaves on validation, as a hostile one would"
+    w.p.models.transition(w.mona, "bought/acme_leak", 1, "submit")
+    w.p.models.transition(w.mgr, "bought/acme_leak", 1, "approve")
+    tw = w.p.warrants.create(
+        w.devi,
+        namespace="bought",
+        name="acme_leak_run",
+        model="bought/acme_leak@v1",
+        featureset=pin,
+        spec={"seed": 3, "target": "y"},
+    )
+    holdout = w.p.warrants.holdout(w.devi, tw["id"])["test"]["x"].astype(float).tolist()
+    with pytest.raises(ValidationFailed) as exc:
+        w.p.warrants.score_holdout(w.devi, tw["id"], values={"leak": 1})
+    said = str(exc.value) + repr(exc.value.context)
+    assert "ROWS" not in said and not any(repr(x) in said for x in holdout)
+    assert exc.value.context == {"sandbox_failure": "raised"}
+    got = w.p.warrants.get(w.devi, tw["id"])
+    assert got["holdout_attempts"] == 1 and got["holdout_scores"][0]["metrics"]["failed"]
+    audit = w.p.access.audit_log(w.admin, action="holdout.blind_failure")
+    assert any("ROWS" in a["detail"]["withheld"] for a in audit), "an administrator can read it"
