@@ -1,3 +1,17 @@
+## Changes made by me
+
+I forked this because I liked the work and wanted to contribute to it.
+This is my change:
+
+**Enforce sandbox output cap while child runs** ([`a4f046d`](https://github.com/muhammad-musa-ml/maya/commit/a4f046d0e32bc59d51a47af8c1fbea6b53512952))
+
+- Changed: `docs/BENCHMARKS.md`, `maya/security/sandbox.py`, `tests/test_sandbox.py`
+- Added: `docs/benchmarks/sandbox-output.json`, `docs/benchmarks/sandbox-output.svg`, `tools/bench/bench_sandbox_output.py`
+
+Everything below this line is the upstream README, unchanged.
+
+---
+
 <p align="center">
   <img src="assets/logo/maya-lockup.svg" alt="MAYA — Model &amp; AI Lifecycle Assurance" width="100%">
 </p>
